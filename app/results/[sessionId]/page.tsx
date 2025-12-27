@@ -1,10 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
-import { useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { useState, useEffect } from "react";
 
-// Mock data
+// Mock data as fallback
 const mockResult = {
   sessionId: "session-1",
   question: "Tell me about yourself",
@@ -23,7 +23,7 @@ const mockResult = {
     uh: 3,
     like: 1,
     "you know": 1,
-  },
+  } as { [key: string]: number },
   feedback: {
     strengths: [
       "Strong content - mentioned specific technologies and leadership experience",
@@ -43,7 +43,130 @@ const mockResult = {
 
 export default function Results() {
   const params = useParams();
-  const [result] = useState(mockResult);
+  const [result, setResult] = useState(mockResult);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const sessionId = params.sessionId as string;
+
+    // Try to load from localStorage
+    const sessionData = localStorage.getItem(sessionId);
+
+    if (sessionData) {
+      try {
+        const parsed = JSON.parse(sessionData);
+
+        // Analyze transcript for filler words
+        const fillerWords = detectFillerWords(parsed.transcript);
+        const fillerScore = calculateFillerScore(fillerWords, parsed.transcript);
+
+        // Create result object from session data
+        setResult({
+          sessionId,
+          question: parsed.question,
+          date: parsed.timestamp,
+          transcript: parsed.transcript,
+          // Use detected filler words
+          fillerWords: fillerWords,
+          // Use mock scores for now (will be replaced with AI analysis later)
+          scores: {
+            ...mockResult.scores,
+            filler: fillerScore,
+          },
+          overall: mockResult.overall,
+          feedback: mockResult.feedback,
+          suggestedAnswer: mockResult.suggestedAnswer,
+        });
+      } catch (error) {
+        console.error('Error parsing session data:', error);
+      }
+    }
+
+    setLoading(false);
+  }, [params.sessionId]);
+
+  const detectFillerWords = (transcript: string) => {
+    const fillerPatterns = {
+      'um': /\bum\b/gi,
+      'uh': /\buh\b/gi,
+      'uhh': /\buhh\b/gi,
+      'err': /\berr\b/gi,
+      'ah': /\bah\b/gi,
+      'like': /\blike\b/gi,
+      'you know': /\byou know\b/gi,
+      'so': /\bso\b/gi,
+      'actually': /\bactually\b/gi,
+      'basically': /\bbasically\b/gi,
+      'literally': /\bliterally\b/gi,
+      'kind of': /\bkind of\b/gi,
+      'sort of': /\bsort of\b/gi,
+      'I mean': /\bI mean\b/gi,
+      'well': /\bwell\b/gi,
+      // Detect standalone "A" which speech recognition often produces for "uh"
+      'uh (A)': /\bA\b(?!\w)/g,
+    };
+
+    const detected: { [key: string]: number } = {};
+
+    for (const [word, pattern] of Object.entries(fillerPatterns)) {
+      const matches = transcript.match(pattern);
+      if (matches && matches.length > 0) {
+        // Special handling for "A" - only count if it appears alone or at start of sentence
+        if (word === 'uh (A)') {
+          // Filter out "A" that's likely part of actual sentences
+          const validMatches = matches.filter((_, index, arr) => {
+            // Get the context around each match
+            const matchIndex = transcript.indexOf('A', index > 0 ? transcript.indexOf(arr[index - 1]) + 1 : 0);
+            const before = transcript.substring(Math.max(0, matchIndex - 10), matchIndex).trim();
+            const after = transcript.substring(matchIndex + 1, Math.min(transcript.length, matchIndex + 10)).trim();
+
+            // Count it as filler if it's isolated or at sentence start with lowercase after
+            return before === '' || /[.!?]\s*$/.test(before) || /^[a-z]/.test(after);
+          });
+
+          if (validMatches.length > 0) {
+            detected[word] = validMatches.length;
+          }
+        } else {
+          detected[word] = matches.length;
+        }
+      }
+    }
+
+    return detected;
+  };
+
+  const calculateFillerScore = (fillerWords: { [key: string]: number }, transcript: string) => {
+    const totalFillers = Object.values(fillerWords).reduce((sum, count) => sum + count, 0);
+    const wordCount = transcript.split(/\s+/).length;
+
+    if (wordCount === 0) return 100;
+
+    // Calculate filler percentage (lower is worse)
+    const fillerPercentage = (totalFillers / wordCount) * 100;
+
+    // Score: 100 - (filler percentage * 10)
+    // If 0% fillers: 100 score
+    // If 5% fillers: 50 score
+    // If 10% fillers: 0 score
+    const score = Math.max(0, Math.min(100, 100 - (fillerPercentage * 10)));
+
+    return Math.round(score);
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
+        <div className="text-center">
+          <svg className="animate-spin h-12 w-12 text-blue-600 mx-auto mb-4" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <p className="text-gray-600 dark:text-gray-400">Loading results...</p>
+        </div>
+      </div>
+    );
+  }
 
   const getScoreColor = (score: number) => {
     if (score >= 85) return "text-green-600 dark:text-green-400";

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 
 const commonQuestions = [
@@ -24,34 +24,177 @@ export default function Practice() {
   const [isRecording, setIsRecording] = useState(false);
   const [hasRecording, setHasRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [liveTranscript, setLiveTranscript] = useState("");
 
-  const handleStartRecording = () => {
-    setIsRecording(true);
-    setHasRecording(false);
-    // TODO: Implement actual recording logic
-    const interval = setInterval(() => {
-      setRecordingTime((prev) => prev + 1);
-    }, 1000);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const audioStreamRef = useRef<MediaStream | null>(null);
+  const audioBlobRef = useRef<Blob | null>(null);
+  const recognitionRef = useRef<any>(null);
 
-    // Auto-stop after demo (remove in production)
-    setTimeout(() => {
-      setIsRecording(false);
-      setHasRecording(true);
-      clearInterval(interval);
-    }, 3000);
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+      }
+      if (audioStreamRef.current) {
+        audioStreamRef.current.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, []);
+
+  const handleStartRecording = async () => {
+    try {
+      setError(null);
+      setLiveTranscript("");
+
+      // Request microphone access
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioStreamRef.current = stream;
+
+      // Create MediaRecorder
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      // Collect audio data
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      // Handle recording stop
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        audioBlobRef.current = audioBlob;
+
+        // Stop all tracks
+        if (audioStreamRef.current) {
+          audioStreamRef.current.getTracks().forEach(track => track.stop());
+        }
+      };
+
+      // Start recording
+      mediaRecorder.start();
+      setIsRecording(true);
+      setHasRecording(false);
+      setRecordingTime(0);
+
+      // Start timer
+      timerIntervalRef.current = setInterval(() => {
+        setRecordingTime((prev) => prev + 1);
+      }, 1000);
+
+      // Start speech recognition for live transcript
+      startSpeechRecognition();
+    } catch (err) {
+      console.error('Error starting recording:', err);
+      setError('Failed to access microphone. Please ensure you have granted permission.');
+    }
+  };
+
+  const startSpeechRecognition = () => {
+    // Check if browser supports speech recognition
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      console.warn('Speech recognition not supported in this browser');
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+
+    let finalTranscriptText = '';
+
+    recognition.onresult = (event: any) => {
+      let interimTranscript = '';
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          finalTranscriptText += transcript + ' ';
+        } else {
+          interimTranscript += transcript;
+        }
+      }
+
+      // Display final transcript + current interim transcript
+      setLiveTranscript(finalTranscriptText + interimTranscript);
+    };
+
+    recognition.onerror = (event: any) => {
+      console.error('Speech recognition error:', event.error);
+      if (event.error !== 'no-speech') {
+        setError(`Speech recognition error: ${event.error}`);
+      }
+    };
+
+    recognition.start();
+    recognitionRef.current = recognition;
   };
 
   const handleStopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
+    }
+
+    // Stop speech recognition
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
+    }
+
     setIsRecording(false);
     setHasRecording(true);
-    // TODO: Implement actual stop recording logic
   };
 
   const handleSubmit = async () => {
-    // TODO: Submit recording to API
-    // For now, redirect to a mock session ID
-    const mockSessionId = `session-${Date.now()}`;
-    router.push(`/results/${mockSessionId}`);
+    if (!audioBlobRef.current) {
+      setError('No recording available to submit');
+      return;
+    }
+
+    if (!liveTranscript.trim()) {
+      setError('No transcript available. Please try recording again.');
+      return;
+    }
+
+    try {
+      setIsSubmitting(true);
+      setError(null);
+
+      // Create session with transcript from live recognition
+      const sessionId = `session-${Date.now()}`;
+
+      // Store session data in localStorage
+      localStorage.setItem(sessionId, JSON.stringify({
+        question: questionToUse,
+        transcript: liveTranscript.trim(),
+        duration: recordingTime,
+        timestamp: new Date().toISOString(),
+      }));
+
+      // Navigate to results
+      router.push(`/results/${sessionId}`);
+    } catch (err) {
+      console.error('Error submitting recording:', err);
+      setError(err instanceof Error ? err.message : 'Failed to submit recording');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const questionToUse = customQuestion || selectedQuestion;
@@ -166,6 +309,28 @@ export default function Practice() {
               </p>
             </div>
 
+            {/* Error Message */}
+            {error && (
+              <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4 mb-6">
+                <div className="flex items-start gap-3">
+                  <svg
+                    className="w-5 h-5 text-red-600 dark:text-red-400 mt-0.5"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                    />
+                  </svg>
+                  <p className="text-sm text-red-800 dark:text-red-200">{error}</p>
+                </div>
+              </div>
+            )}
+
             {/* Recording Interface */}
             <div className="flex flex-col items-center space-y-6">
               {/* Recording Status */}
@@ -271,34 +436,96 @@ export default function Practice() {
                       onClick={() => {
                         setHasRecording(false);
                         setRecordingTime(0);
+                        audioBlobRef.current = null;
+                        audioChunksRef.current = [];
+                        setError(null);
+                        setLiveTranscript("");
                       }}
-                      className="px-6 py-4 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors font-semibold"
+                      disabled={isSubmitting}
+                      className="px-6 py-4 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       Re-record
                     </button>
                     <button
                       onClick={handleSubmit}
-                      className="px-8 py-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-semibold flex items-center gap-2"
+                      disabled={isSubmitting}
+                      className="px-8 py-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-semibold flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      Submit for Feedback
-                      <svg
-                        className="w-5 h-5"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M13 7l5 5m0 0l-5 5m5-5H6"
-                        />
-                      </svg>
+                      {isSubmitting ? (
+                        <>
+                          <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                          </svg>
+                          Processing...
+                        </>
+                      ) : (
+                        <>
+                          Submit for Feedback
+                          <svg
+                            className="w-5 h-5"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M13 7l5 5m0 0l-5 5m5-5H6"
+                            />
+                          </svg>
+                        </>
+                      )}
                     </button>
                   </>
                 )}
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Live Transcript Display */}
+        {(isRecording || hasRecording) && liveTranscript && (
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 mb-6">
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
+              <svg
+                className="w-6 h-6 text-blue-600"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                />
+              </svg>
+              Live Transcript
+              {isRecording && (
+                <span className="ml-2 text-sm font-normal text-gray-600 dark:text-gray-400">
+                  (updating as you speak...)
+                </span>
+              )}
+            </h2>
+            <div className="bg-gray-50 dark:bg-gray-900 rounded-lg p-4 min-h-[120px] max-h-[300px] overflow-y-auto">
+              <p className="text-gray-700 dark:text-gray-300 leading-relaxed whitespace-pre-wrap">
+                {liveTranscript || (
+                  <span className="text-gray-400 dark:text-gray-600 italic">
+                    Start speaking to see your transcript here...
+                  </span>
+                )}
+              </p>
+            </div>
+            {hasRecording && (
+              <div className="mt-4 flex items-start gap-2 text-sm text-blue-600 dark:text-blue-400">
+                <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <p>This transcript will be analyzed for feedback when you submit.</p>
+              </div>
+            )}
           </div>
         )}
 
